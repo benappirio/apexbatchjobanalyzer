@@ -1,0 +1,140 @@
+<apex:page showHeader="true" sidebar="true">
+  <!--
+    (c) Appirio
+    1/6/2015  Ben Lorenz          Created
+  -->  
+  <head>
+    <title>Apex Job Analysis</title>
+    <script language="javascript" src="/soap/ajax/31.0/connection.js" type="text/javascript" />
+    <script type="text/javascript">sforce.connection.sessionId = "{!$Api.Session_ID}";</script>
+    <script type="text/javascript" src="https://www.google.com/jsapi"></script>
+    <link rel="stylesheet" href="https://code.jquery.com/ui/1.11.2/themes/smoothness/jquery-ui.css" />
+    <script src="https://code.jquery.com/jquery-2.1.3.min.js"></script>
+    <script src="https://code.jquery.com/ui/1.11.2/jquery-ui.min.js"></script>
+    <script>$(function() {$( ".datePick" ).datepicker();});</script>
+    <script type="text/javascript" >
+      google.load("visualization", "1", {packages:["corechart"]});
+      google.setOnLoadCallback(doNothing);
+      function doNothing(){}
+      
+      /* function to return an sfdc like DateTime string for the current date and time e.g. 2014-12-30T00:00:00.000Z */
+      function getCurrDateStr() { 
+       	var d = new Date();
+       	retStr = d.getFullYear() + '-' + padDatePart(d.getMonth()+ 1) + '-' + padDatePart(d.getDate()) + 'T' + 
+       	         padDatePart(d.getHours()) + ':' + padDatePart(d.getMinutes()) + ':00.000Z';
+       	return retStr;
+      }
+
+      /* function to pad/prefix date part if less than 10 e.g. 1 becomes 01 */
+      function padDatePart (datePart) {
+      	return datePart.toString().length < 2 ? '0' + datePart : datePart ;
+      }
+
+      /* function to return the count of hourly periods between 2 dates */
+      function hoursBetween (sd, ey,em,edy,eh) {
+      	for (var i=1;i<336; i++) { //don't loop more than 2 weeks worth of hours
+      	  ny=sd.getFullYear();nm=sd.getMonth();ndy=sd.getDate();nh=sd.getHours();
+          if(ey==ny && em==nm && edy==ndy && eh==nh) {return i};
+          sd=new Date(sd.setHours(sd.getHours()+1));
+        }
+      }
+
+      /* function to retrieve data and build the chart */
+      function drawChart() {
+        try{
+          // Get the records we want to analyse
+          //selected dates come at us backwards e.g. 01/07/2015 and we need to turn it into a SOQL friendly date
+          defTime = 'T00:00:00.000Z';
+          sDateArr = $('#sDate').val().split('/');
+          eDateArr = $('#eDate').val().split('/');
+          sDate = sDateArr[2] + '-' + sDateArr[0] + '-' + sDateArr[1] + defTime;
+          eDate = eDateArr[2] + '-' + eDateArr[0] + '-' + eDateArr[1] + defTime;
+          var query = "SELECT Id,JobType,CompletedDate,CreatedDate,JobItemsProcessed,LastProcessed " +
+                      "FROM AsyncApexJob " +
+                      "WHERE JobType=\'BatchApex\' and " +
+                            "CreatedDate > " + sDate + " and CreatedDate < " + eDate;
+          var result = sforce.connection.query(query);
+          var apexJobArray = result.getArray('records');
+          var jobInfo = {}; // obj to store results {timeKey : {jobs : , batches : }} timeKey format is year-month-day_hour
+          for(var i=0;i<apexJobArray.length;i++){
+          	//parse start and end date parts into usable local vars
+            s = apexJobArray[i].CreatedDate;
+            e = apexJobArray[i].CompletedDate == null ? getCurrDateStr() : apexJobArray[i].CompletedDate;
+            startTimeArr = s.slice(s.indexOf('T')+1).split(':');
+            startHr = Number(startTimeArr[0]);
+            startMin = Number(startTimeArr[1]);
+            startDateArr = s.slice(0,s.indexOf('T')).split('-');
+            keyYear = Number(startDateArr[0]);
+            keyMonth = Number(startDateArr[1]);
+            keyDay = Number(startDateArr[2]);
+            endDateArr = e.slice(0,e.indexOf('T')).split('-');
+            endYear = Number(endDateArr[0]);
+            endMonth = Number(endDateArr[1]);
+            endDay = Number(endDateArr[2]);
+            endTimeArr = e.slice(e.indexOf('T')+1).split(':');
+            endHr = Number(endTimeArr[0]);
+            endMin = Number(endTimeArr[1]);
+            totBatches = Number(apexJobArray[i].JobItemsProcessed);
+            totMin = (60-startMin) + (((endHr - startHr)-1) * 60) + endMin;  // total running minutes of batch job
+            batchesPerMin = totBatches / totMin; 
+            loopEndInt = hoursBetween(new Date(keyYear,keyMonth-1,keyDay,startHr),endYear, endMonth-1, endDay, endHr);
+            for(var j=1; j<=loopEndInt; j++,startHr++){ //add the entries to the jobInfo obj, 1 for each hour the job was running
+              if(startHr == 24) { // we are in a new day
+              	startHr = 0; //reset hour to 0
+              	newDate = new Date(keyYear,keyMonth-1,keyDay+1); 
+              	if (newDate.getDate() === 1) { // if date for the new day is first day of month, set new month and year
+              		keyMonth = newDate.getMonth()+ 1;
+              		keyYear = newDate.getFullYear();
+              	} else {  // same month, just increment the day
+              		keyDay++; 
+              	}
+              }
+              key = keyYear + '-' + keyMonth + '-' + keyDay + '_' + padDatePart(startHr); 
+              if (loopEndInt==1) { // job ran within an hour, all batches count
+              	jobCnt = totBatches;
+              } else { //job ran over multiple hours, calculate how many in this particular hour
+              	jobCnt = j==1 ? (60-startMin)*batchesPerMin : j==loopEndInt ? endMin * batchesPerMin : 60 * batchesPerMin ;
+              }
+              if (key in jobInfo) {
+              	jobInfo[key].jobs ++;
+              	jobInfo[key].batches += jobCnt;
+              } else {
+              	jobInfo[key] = {jobs:1,batches: jobCnt};
+              }
+            }
+          }
+        } catch (e) {
+        	console.log(e);
+        }
+        //draw chart
+        var chartData = new google.visualization.DataTable();
+        chartData.addColumn('string','Hour');
+        chartData.addColumn('number','Jobs');
+        chartData.addColumn('number','Batches');
+        for (var h in jobInfo) {
+          chartData.addRow([h,jobInfo[h].jobs,jobInfo[h].batches]);
+        }      
+        var options = {
+          title: 'Apex Batch Job Volumes',
+          curveType: 'function',
+          legend: { position: 'bottom' },
+          pointShape: 'diamond',
+          pointSize: 4
+        };
+        var chart = new google.visualization.LineChart(document.getElementById('linechart'));
+        chart.draw(chartData, options);
+      }
+    </script>
+  </head>
+  <body>
+    <p>
+      Start Date: <input type="text" id="sDate" class="datePick" />&nbsp;&nbsp;
+      End Date: <input type="text" id="eDate" class="datePick" />&nbsp;&nbsp;
+      <input type="button" value="Draw Chart" onclick="drawChart();" />
+    </p> 
+    <p><b>NOTE:</b></p>
+    <p>1. Jobs are selected based on job CreatedDate &gt;= selected Start Date and &lt; selected End Date.</p>
+    <p>2. All times are in UTC</p>
+    <div id="linechart" style="width: 100%; height:500px;"></div>
+  </body>
+</apex:page>
