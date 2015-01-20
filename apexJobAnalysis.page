@@ -14,30 +14,47 @@
     <script>$(function() {$( ".datePick" ).datepicker();});</script>
     <script type="text/javascript" >
       google.load("visualization", "1", {packages:["corechart"]});
+      google.load("visualization", "1", {packages:["table"]});
       google.setOnLoadCallback(doNothing);
       function doNothing(){}
       
       /* function to return an sfdc like DateTime string for the current date and time e.g. 2014-12-30T00:00:00.000Z */
       function getCurrDateStr() { 
-       	var d = new Date();
-       	retStr = d.getFullYear() + '-' + padDatePart(d.getMonth()+ 1) + '-' + padDatePart(d.getDate()) + 'T' + 
-       	         padDatePart(d.getHours()) + ':' + padDatePart(d.getMinutes()) + ':00.000Z';
-       	return retStr;
+        var d = new Date();
+        retStr = d.getFullYear() + '-' + padDatePart(d.getMonth()+ 1) + '-' + padDatePart(d.getDate()) + 'T' + 
+                 padDatePart(d.getHours()) + ':' + padDatePart(d.getMinutes()) + ':00.000Z';
+        return retStr;
       }
 
       /* function to pad/prefix date part if less than 10 e.g. 1 becomes 01 */
       function padDatePart (datePart) {
-      	return datePart.toString().length < 2 ? '0' + datePart : datePart ;
+        return datePart.toString().length < 2 ? '0' + datePart : datePart ;
       }
 
       /* function to return the count of hourly periods between 2 dates */
       function hoursBetween (sd, ey,em,edy,eh) {
-      	for (var i=1;i<336; i++) { //don't loop more than 2 weeks worth of hours
-      	  ny=sd.getFullYear();nm=sd.getMonth();ndy=sd.getDate();nh=sd.getHours();
+        for (var i=1;i<336; i++) { //don't loop more than 2 weeks worth of hours
+          ny=sd.getFullYear();nm=sd.getMonth();ndy=sd.getDate();nh=sd.getHours();
           if(ey==ny && em==nm && edy==ndy && eh==nh) {return i};
           sd=new Date(sd.setHours(sd.getHours()+1));
         }
       }
+
+      /* function to sort an object by a numeric key */
+      function sortObj(obj) {
+        tempArr = [];
+        for (var key in obj) {
+          if (obj.hasOwnProperty(key)) {
+            tempArr.push(key);
+          }
+        }
+        tempArr.sort();
+        tempObj = {};
+        for (var i=0; i<tempArr.length; i++) {
+          tempObj[tempArr[i]] = obj[tempArr[i]];
+        }
+        return tempObj;
+      };
 
       /* function to retrieve data and build the chart */
       function drawChart() {
@@ -56,8 +73,9 @@
           var result = sforce.connection.query(query);
           var apexJobArray = result.getArray('records');
           var jobInfo = {}; // obj to store results {timeKey : {jobs : , batches : }} timeKey format is year-month-day_hour
+          var jobInfoMinutes = {}; // obj to store results {timeKey : jobs} timeKey format is year-month-day_hour:min
           for(var i=0;i<apexJobArray.length;i++){
-          	//parse start and end date parts into usable local vars
+            //parse start and end date parts into usable local vars
             s = apexJobArray[i].CreatedDate;
             e = apexJobArray[i].CompletedDate == null ? getCurrDateStr() : apexJobArray[i].CompletedDate;
             startTimeArr = s.slice(s.indexOf('T')+1).split(':');
@@ -78,41 +96,75 @@
             totMin = (60-startMin) + (((endHr - startHr)-1) * 60) + endMin;  // total running minutes of batch job
             batchesPerMin = totBatches / totMin; 
             loopEndInt = hoursBetween(new Date(keyYear,keyMonth-1,keyDay,startHr),endYear, endMonth-1, endDay, endHr);
+            //add entries to the hourly jobInfo 
             for(var j=1; j<=loopEndInt; j++,startHr++){ //add the entries to the jobInfo obj, 1 for each hour the job was running
               if(startHr == 24) { // we are in a new day
-              	startHr = 0; //reset hour to 0
-              	newDate = new Date(keyYear,keyMonth-1,keyDay+1); 
-              	if (newDate.getDate() === 1) { // if date for the new day is first day of month, set new month and year
-              		keyMonth = newDate.getMonth()+ 1;
-              		keyYear = newDate.getFullYear();
-              	} else {  // same month, just increment the day
-              		keyDay++; 
-              	}
+                startHr = 0; //reset hour to 0
+                newDate = new Date(keyYear,keyMonth-1,keyDay+1); 
+                if (newDate.getDate() === 1) { // if date for the new day is first day of month, set new month and year
+                  keyMonth = newDate.getMonth()+ 1;
+                  keyYear = newDate.getFullYear();
+                } else {  // same month, just increment the day
+                  keyDay++; 
+                }
               }
               key = keyYear + '-' + keyMonth + '-' + keyDay + '_' + padDatePart(startHr); 
               if (loopEndInt==1) { // job ran within an hour, all batches count
-              	jobCnt = totBatches;
+                jobCnt = totBatches;
               } else { //job ran over multiple hours, calculate how many in this particular hour
-              	jobCnt = j==1 ? (60-startMin)*batchesPerMin : j==loopEndInt ? endMin * batchesPerMin : 60 * batchesPerMin ;
+                jobCnt = j==1 ? (60-startMin)*batchesPerMin : j==loopEndInt ? endMin * batchesPerMin : 60 * batchesPerMin ;
               }
               if (key in jobInfo) {
-              	jobInfo[key].jobs ++;
-              	jobInfo[key].batches += jobCnt;
+                jobInfo[key].jobs ++;
+                jobInfo[key].batches += jobCnt;
               } else {
-              	jobInfo[key] = {jobs:1,batches: jobCnt};
+                jobInfo[key] = {jobs:1,batches: jobCnt};
               }
+              //add keys to jobs per minute map
+              hourlyStartMin = loopEndInt==1 || j==1 ? startMin : 0; 
+              hourlyEndMin = loopEndInt==1 || j==loopEndInt ? endMin : 60; 
+              for (;hourlyStartMin<=hourlyEndMin;hourlyStartMin++) {
+                minKey = key + ':' + hourlyStartMin.toString();
+                if (minKey in jobInfoMinutes) {
+                  jobInfoMinutes[minKey] ++;
+                } else {
+                  jobInfoMinutes[minKey] = 1;
+                }
+              }
+
             }
           }
         } catch (e) {
-        	console.log(e);
+          console.log(e);
         }
-        //draw chart
+        //draw chart for at risk minutes
+        var chartData1 = new google.visualization.DataTable();
+        chartData1.addColumn('string','Minute');
+        chartData1.addColumn('number','Jobs');
+        var options1 = {
+          title: 'At Risk Minutes',
+          curveType: 'function',
+          legend: { position: 'bottom' },
+          pointShape: 'diamond',
+          pointSize: 4
+        };
+        sortedMinJobs = sortObj(jobInfoMinutes);
+        for (var k in sortedMinJobs) {
+          jobsThisMin = sortedMinJobs[k];
+          if (jobsThisMin > 3) {
+            chartData1.addRow([k,sortedMinJobs[k]]);
+          }
+        }
+        var chart = new google.visualization.LineChart(document.getElementById('linechart1'));
+        chart.draw(chartData1, options1);
+        //draw chart for hourly volumes
         var chartData = new google.visualization.DataTable();
         chartData.addColumn('string','Hour');
         chartData.addColumn('number','Jobs');
         chartData.addColumn('number','Batches');
-        for (var h in jobInfo) {
-          chartData.addRow([h,jobInfo[h].jobs,jobInfo[h].batches]);
+        sortedJobInfo = sortObj(jobInfo);
+        for (var h in sortedJobInfo) {
+          chartData.addRow([h,sortedJobInfo[h].jobs,sortedJobInfo[h].batches]);
         }      
         var options = {
           title: 'Apex Batch Job Volumes',
@@ -135,6 +187,8 @@
     <p><b>NOTE:</b></p>
     <p>1. Jobs are selected based on job CreatedDate &gt;= selected Start Date and &lt; selected End Date.</p>
     <p>2. All times are in UTC</p>
-    <div id="linechart" style="width: 100%; height:500px;"></div>
+    <p>3. At risk minutes are defined as times when there are 4+ jobs running in that minute.</p>
+    <div id="linechart" style="width: 100%; height:500px;"></div><br/><br/>
+    <div id="linechart1" style="width: 100%; height:500px;"></div><br/><br/>
   </body>
 </apex:page>
